@@ -118,21 +118,32 @@ pass_syntax() {
   else
     bad "node is not installed — JavaScript checks skipped"
   fi
-  # QML
+  # QML. Import paths differ per distribution (Arch: /usr/lib/qt6/qml,
+  # Debian/Ubuntu: /usr/lib/<triplet>/qt6/qml); pass every one that exists.
+  # Only "critical" findings fail the pass — unresolved qs.* imports are
+  # expected outside a running shell and are warnings, not errors.
   local qmllint=""
   for f in /usr/lib/qt6/bin/qmllint "$(command -v qmllint || true)"; do [[ -n $f && -x $f ]] && { qmllint=$f; break; }; done
   if [[ -n $qmllint ]]; then
-    local out
-    out="$("$qmllint" -I /usr/lib/qt6/qml --json - Panel.qml Service.qml 2>/dev/null | python3 -c '
+    local imports=()
+    local d
+    for d in /usr/lib/qt6/qml /usr/lib/*/qt6/qml /usr/lib64/qt6/qml; do [[ -d $d ]] && imports+=(-I "$d"); done
+    local raw
+    raw="$("$qmllint" "${imports[@]}" --json - Panel.qml Service.qml 2>&1 || true)"
+    local verdict
+    verdict="$(printf '%s' "$raw" | python3 -c '
 import json,sys
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
+raw=sys.stdin.read()
+try:
+    d=json.loads(raw)
+except Exception:
+    print("qmllint produced no JSON:", raw[:400].replace("\n"," ")); sys.exit(1)
 bad=0
 for f in d.get("files",[]):
     for w in f.get("warnings",[]):
         if w.get("type")=="critical" or "Expected" in str(w.get("message","")):
-            print(f["filename"].split("/")[-1], w.get("line"), w.get("message")); bad=1
-sys.exit(bad)' 2>&1)" && ok "Panel.qml, Service.qml (qmllint)" || { bad "qmllint:"; printf '%s\n' "$out" | sed 's/^/      /'; }
+            print(f["filename"].split("/")[-1], w.get("line"), w.get("id"), w.get("message")); bad=1
+sys.exit(bad)' 2>&1)" && ok "Panel.qml, Service.qml (qmllint)" || { bad "qmllint:"; printf '%s\n' "$verdict" | sed 's/^/      /'; }
   else
     bad "qmllint is not installed (qt6-declarative) — QML checks skipped"
   fi
