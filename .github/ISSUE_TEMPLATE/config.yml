@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/JohnAndrewsX/omarchy-jdownloader/security/advisories/new
+    about: Report privately — please not as a public issue.
+  - name: Out of scope on purpose
+    url: https://github.com/JohnAndrewsX/omarchy-jdownloader/blob/main/DESIGN.md
+    about: Speed, progress and package lists need JDownloader's deprecated API or the cloud. DESIGN.md explains why the widget does not go there.

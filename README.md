@@ -178,6 +178,15 @@ binaries.
 Like every Omarchy plugin, the code runs unsandboxed inside the shell. Read
 it before enabling it — it is short.
 
+## Contributing
+
+Bug reports, translations and fixes that keep the scope are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md). Two things to know before opening
+anything: this repository never contains a real path, machine or person
+(issues included), and the widget will not grow into a dashboard — what it
+cannot see and why is in [DESIGN.md](DESIGN.md). Security reports go through
+GitHub's private reporting, see [SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT.

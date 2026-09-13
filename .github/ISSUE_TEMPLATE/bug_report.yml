@@ -1,0 +1,48 @@
+name: Bug report
+description: Something the widget does wrong
+title: "<what happens, in one line>"
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is public. Please replace your home path and anything that names your machine
+        before pasting (see CONTRIBUTING.md — "The one rule").
+  - type: textarea
+    id: observed
+    attributes:
+      label: What happened
+      description: What you did, what you saw, what you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Widget summary
+      description: Output of `omarchy-shell io.github.johnandrewsx.jdownloader summary`, paths redacted
+      render: json
+    validations:
+      required: false
+  - type: textarea
+    id: journal
+    attributes:
+      label: Shell journal
+      description: Relevant lines from `journalctl --user -t omarchy-shell`, especially anything with `Plugin widget` or `jdownloader:`
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Omarchy version, Hyprland version, JDownloader revision (the `version` field in the summary)
+      placeholder: "Omarchy 4.x · Hyprland 0.56 · JDownloader 48637"
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I removed my home path, hostname and anything else that identifies my machine
+          required: true
