@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.johnandrewsx.jdownloader",
+  "name": "JDownloader",
+  "version": "0.2.0",
+  "author": "JohnAndrewsX",
+  "license": "MIT",
+  "description": "JDownloader in the Omarchy bar: bring the window back or tuck it away, send links via Click'n'Load, keep an eye on finished downloads — no cloud, no account, no deprecated API.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "JDownloader",
+    "description": "The tray icon JDownloader cannot have under Wayland: show/hide the window, send a link from the clipboard, see finished downloads, set font size and smoothing. English and German.",
+    "category": "Files",
+    "aliases": [
+      "jdownloader",
+      "jd",
+      "download",
+      "downloads"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "language": "auto",
+      "watchDefaultFolder": true,
+      "extraFolders": [],
+      "notifyOnFinish": true,
+      "clickAction": "hide",
+      "recentCount": 8,
+      "statusIntervalSec": 5
+    },
+    "schema": [
+      {
+        "key": "language",
+        "type": "enum",
+        "label": "Language",
+        "options": [
+          "auto",
+          "en",
+          "de"
+        ],
+        "defaultValue": "auto",
+        "description": "auto follows the session locale (LANGUAGE, LC_MESSAGES, LANG); English is the fallback."
+      },
+      {
+        "key": "clickAction",
+        "type": "enum",
+        "label": "Right-click on a visible window",
+        "options": [
+          "hide",
+          "focus"
+        ],
+        "defaultValue": "hide",
+        "description": "hide tucks the window into a special workspace, focus only brings it to the front."
+      },
+      {
+        "key": "recentCount",
+        "type": "integer",
+        "label": "Finished downloads shown in the panel",
+        "min": 3,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 8
+      },
+      {
+        "key": "statusIntervalSec",
+        "type": "integer",
+        "label": "Status poll interval (seconds)",
+        "min": 2,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 5
+      }
+    ]
+  }
+}

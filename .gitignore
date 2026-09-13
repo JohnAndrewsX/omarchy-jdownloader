@@ -1,0 +1,32 @@
+# Project-local ignore. Secrets and OS noise are already covered by the
+# global ~/.config/git/ignore — this file carries only this project's
+# byproducts and, above all, anything that could carry local truth out of
+# this machine and into a public repository.
+
+# ── Local truth. None of this is ever committed. ────────────────────
+# The German design log names a real machine, real paths and a real
+# person. It stays beside the code and out of the repository; the public
+# half of it is DESIGN.md.
+*.local.md
+*.local.toml
+*.local.json
+# A privacy word list is personal by definition (see bin/check).
+.privacy-words
+
+# ── QML / tooling byproducts ──────────────────────────────────────────
+*.qmlc
+*.jsc
+.qmlls.ini
+__pycache__/
+*.pyc
+
+# ── Scratch, screenshots (a screenshot shows a real desktop) ──────────
+tmp/
+*.png
+*.jpg
+.mise.local.toml
+
+# ── Editors and vaults ──────────────────────────────────────────────
+.obsidian/
+.idea/
+.vscode/

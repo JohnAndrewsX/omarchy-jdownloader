@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# jd-notify — one desktop notification, delivered once.
+#
+#   jd-notify TITLE BODY
+#
+# The Omarchy bar exists per monitor, so the widget runs several times and
+# every instance sees the same file events. To keep "download finished" from
+# popping up twice, this script remembers the hash of the last message under
+# a flock; the same message within 5 s is swallowed.
+set -uo pipefail
+
+title="${1:-JDownloader}"
+body="${2:-}"
+run="${XDG_RUNTIME_DIR:-/tmp}"
+lock="$run/omarchy-jdownloader-notify.lock"
+stamp="$run/omarchy-jdownloader-notify.last"
+
+key="$(printf '%s\n%s' "$title" "$body" | md5sum | cut -d' ' -f1)"
+now="$(date +%s)"
+
+exec 9>"$lock"
+flock -w 2 9 || exit 0
+
+if [[ -f $stamp ]]; then
+  read -r last_key last_time < "$stamp" || true
+  if [[ ${last_key:-} == "$key" ]] && (( now - ${last_time:-0} < 5 )); then
+    exit 0
+  fi
+fi
+printf '%s %s\n' "$key" "$now" > "$stamp"
+
+command -v notify-send >/dev/null 2>&1 || exit 0
+notify-send -a JDownloader -i jdownloader "$title" "$body"

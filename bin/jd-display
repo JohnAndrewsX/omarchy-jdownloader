@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# jd-display — font smoothing and interface size of JDownloader.
+#
+# Both are Java VM switches, not JDownloader settings. Swing takes font
+# smoothing and UI scaling from XSettings on X11; under Hyprland there is no
+# XSettings daemon, so Java never sees the machine's fontconfig settings.
+# The switches live in a user override of the desktop file, which shadows
+# the package file by XDG precedence and survives package updates:
+#
+#   ~/.local/share/applications/jdownloader.desktop
+#     Exec=env _JAVA_OPTIONS="…" JDownloader
+#
+# This file may be written at any time — it is only read at launch. Nothing
+# under ~/.jd/cfg/ is touched: that belongs to JDownloader, which writes it
+# while running.
+#
+#   jd-display get                       JSON: {scale, smoothing, overrideExists, path, exec}
+#   jd-display set SCALE SMOOTHING       SCALE 1|2|3 (whole numbers!) · SMOOTHING on|lcd|off
+#   jd-display restart                   stop JD cleanly (SIGTERM) and launch it again
+#
+# Why whole numbers only: Java's X11 backend truncates the value —
+# X11GraphicsDevice.initScaleFactor() does `return (int) debugScale`.
+# 1.25, 1.5 and 1.75 are all 1. The script refuses fractions instead of
+# writing them silently to no effect.
+#
+# Errors are JSON on stdout with exit 1: {ok:false, code, message}.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+USER_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+OVERRIDE="$USER_DIR/jdownloader.desktop"
+SYSTEM="/usr/share/applications/jdownloader.desktop"
+
+fail() { jq -cn --arg code "$1" --arg message "$2" '{ok: false, code: $code, message: $message}'; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "display.missing_tool" "'$1' is missing"; }
+need jq
+
+exec_line() {
+  local f="$1"
+  [[ -f $f ]] || return 0
+  grep -m1 '^Exec=' "$f" || true
+}
+
+parse_scale() { sed -n 's/.*-Dsun\.java2d\.uiScale=\([0-9.]*\).*/\1/p' <<<"$1" | head -n1; }
+parse_smoothing() {
+  local v; v="$(sed -n 's/.*-Dawt\.useSystemAAFontSettings=\([A-Za-z_]*\).*/\1/p' <<<"$1" | head -n1)"
+  case "${v,,}" in
+    lcd|lcd_hrgb|lcd_hbgr|lcd_vrgb|lcd_vbgr) echo lcd ;;
+    on|gasp) echo on ;;
+    off|false|"") echo off ;;
+    *) echo "$v" ;;
+  esac
+}
+
+cmd_get() {
+  local line exists=false path="$SYSTEM"
+  if [[ -f $OVERRIDE ]]; then exists=true; path="$OVERRIDE"; fi
+  line="$(exec_line "$path")"
+  local scale smoothing
+  scale="$(parse_scale "$line")"; [[ -n $scale ]] || scale="1"
+  # Java truncates — report what actually applies, not what the file says.
+  scale="${scale%%.*}"; [[ $scale =~ ^[0-9]+$ ]] || scale="1"; (( scale < 1 )) && scale=1
+  smoothing="$(parse_smoothing "$line")"
+  jq -cn --arg scale "$scale" --arg smoothing "$smoothing" --argjson exists "$exists" \
+    --arg path "$path" --arg exec "${line#Exec=}" \
+    '{ok: true, scale: $scale, smoothing: $smoothing, overrideExists: $exists, path: $path, exec: $exec}'
+}
+
+cmd_set() {
+  local scale="${1:-}" smoothing="${2:-}"
+  # Accept "2.0" from older overrides, refuse real fractions.
+  [[ $scale =~ ^([1-3])(\.0+)?$ ]] || fail "display.invalid_scale" "SCALE must be 1, 2 or 3 — Java on X11 has no in-between values (1.5 would be 1)"
+  scale="${BASH_REMATCH[1]}"
+  case "$smoothing" in on|lcd|off) ;; *) fail "display.invalid_smoothing" "SMOOTHING must be on, lcd or off" ;; esac
+
+  local opts="-Dsun.java2d.uiScale=$scale"
+  case "$smoothing" in
+    on)  opts="-Dawt.useSystemAAFontSettings=on -Dswing.aatext=true $opts" ;;
+    lcd) opts="-Dawt.useSystemAAFontSettings=lcd -Dswing.aatext=true $opts" ;;
+    off) opts="-Dawt.useSystemAAFontSettings=off -Dswing.aatext=false $opts" ;;
+  esac
+  local new_exec="Exec=env _JAVA_OPTIONS=\"$opts\" JDownloader"
+
+  mkdir -p "$USER_DIR"
+  if [[ ! -f $OVERRIDE ]]; then
+    [[ -f $SYSTEM ]] || fail "display.no_desktop_file" "no desktop file found: $SYSTEM"
+    {
+      echo "# User override for $SYSTEM — created by the Omarchy JDownloader widget."
+      echo "# Swing reads no XSettings under Hyprland; font smoothing and scaling must"
+      echo "# be passed as JVM switches. Only the Exec line is managed by the widget."
+      cat "$SYSTEM"
+    } > "$OVERRIDE"
+  fi
+
+  # Replace only the Exec line; everything else (including the user's own
+  # edits) stays. Atomic via a temp file in the same directory.
+  local tmp; tmp="$(mktemp "$USER_DIR/.jdownloader.desktop.XXXXXX")"
+  if grep -q '^Exec=' "$OVERRIDE"; then
+    awk -v repl="$new_exec" '
+      /^Exec=/ && !done { print repl; done = 1; next }
+      { print }
+    ' "$OVERRIDE" > "$tmp"
+  else
+    { cat "$OVERRIDE"; echo "$new_exec"; } > "$tmp"
+  fi
+  mv -f "$tmp" "$OVERRIDE"
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$USER_DIR" 2>/dev/null || true
+  cmd_get
+}
+
+cmd_restart() {
+  local pid
+  pid="$(pgrep -u "$(id -u)" -f 'java .*JDownloader\.jar' 2>/dev/null | head -n1 || true)"
+  if [[ -n $pid ]]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    local i
+    for ((i = 0; i < 60; i++)); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.5
+    done
+    kill -0 "$pid" 2>/dev/null && fail "display.still_running" "JDownloader (PID $pid) did not exit within 30s"
+    sleep 0.5
+  fi
+  "$HERE/jd-window" launch
+  jq -cn '{ok: true, code: "display.restarted", message: "JDownloader restarted"}'
+}
+
+case "${1:-}" in
+  get)     cmd_get ;;
+  set)     cmd_set "${2:-}" "${3:-}" ;;
+  restart) cmd_restart ;;
+  -h|--help|"") sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; [[ -n ${1:-} ]] || exit 1 ;;
+  *) fail "display.usage" "unknown command: $1" ;;
+esac

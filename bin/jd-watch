@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# jd-watch — stream file events from the watched folders and changes to
+# JDownloader's configuration as lines on stdout.
+#
+#   jd-watch DIR [DIR…]
+#
+# Line format (tab-separated):  <EVENTS>\t<path>
+#   MOVED_TO      ~/Downloads/pkg/film.mkv              → finished (JD renames the .part)
+#   CREATE        ~/Downloads/pkg/film.mkv.part         → something is happening
+#   MOVED_TO      ~/.jd/cfg/…GeneralSettings.json       → configuration rewritten
+#
+# A single inotifywait via exec: when the plugin reloads, the shell kills
+# exactly this process and nothing is left orphaned (children started in the
+# background survive a SIGKILL of their parent — that was the first version).
+# --pdeathsig additionally ties it to the shell.
+#
+# JDownloader's cfg folder is watched alongside (small, a few hundred files);
+# the widget filters for GeneralSettings.json. JD writes its configuration
+# via temp file + rename, and it does so while running.
+set -uo pipefail
+
+command -v inotifywait >/dev/null 2>&1 || { echo "jd-watch: inotifywait is missing (package inotify-tools)" >&2; exit 1; }
+
+targets=()
+for d in "$@"; do [[ -d $d ]] && targets+=("$d"); done
+for c in "$HOME/.jd/cfg" /opt/JDownloader/cfg; do [[ -d $c ]] && targets+=("$c"); done
+(( ${#targets[@]} > 0 )) || { echo "jd-watch: nothing to watch" >&2; exit 2; }
+
+wrap=()
+command -v setpriv >/dev/null 2>&1 && wrap=(setpriv --pdeathsig TERM)
+
+exec "${wrap[@]}" inotifywait -m -q -r \
+  -e close_write -e moved_to -e moved_from -e create -e delete \
+  --format $'%e\t%w%f' "${targets[@]}"

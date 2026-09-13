@@ -1,0 +1,67 @@
+# purpose : run bin/check on every pull request and on main — privacy patterns first,
+#           then gitleaks over the whole history, then syntax. No secrets, no deploys.
+# contract: the job name `check` stays stable; branch protection requires it.
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # bin/check needs gitleaks on PATH. Pinned by version and by the SHA-256 from
+      # the release's checksums file; bump both together.
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks scans the whole history: what a push would publish
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check --strict
+          mkdir -p gitleaks
+          tar -xzf "$archive" -C gitleaks gitleaks
+          install -m 0755 gitleaks/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Install qmllint and jq
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes qt6-declarative-dev-tools jq
+          qmllint="$(command -v qmllint || true)"
+          for candidate in /usr/lib/qt6/bin/qmllint /usr/lib/*/qt6/bin/qmllint; do
+            if [ -z "$qmllint" ] && [ -x "$candidate" ]; then qmllint="$candidate"; fi
+          done
+          test -n "$qmllint"
+          echo "$(dirname "$qmllint")" >> "$GITHUB_PATH"
+          "$qmllint" --version
+
+      - name: Set up Node (for the JavaScript syntax and Lang.js parity checks)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: bin/check
+        run: bin/check

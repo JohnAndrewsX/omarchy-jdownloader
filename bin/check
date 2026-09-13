@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# bin/check — the gate before a commit and the job CI runs.
+#
+#   bin/check            every pass
+#   bin/check privacy    only the privacy patterns (AGENTS.md §0)
+#   bin/check security   only gitleaks over the git history
+#   bin/check syntax     only QML / JavaScript / shell / Python / manifest / Lang.js
+#
+# Exit 0 when everything passes. Passes that need a tool the machine lacks
+# say so and fail — a gate that says "ok" because its scanner is missing
+# would be worse than none.
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+cd "$ROOT"
+failed=0
+note() { printf '%s\n' "$*"; }
+bad() { printf '  ✗ %s\n' "$*"; failed=1; }
+ok() { printf '  ✓ %s\n' "$*"; }
+
+# Files that would be committed: tracked plus untracked-but-not-ignored.
+tracked_files() {
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git ls-files --cached --others --exclude-standard
+  else
+    find . -type f -not -path './.git/*' | sed 's#^\./##'
+  fi
+}
+
+pass_privacy() {
+  note "privacy (AGENTS.md §0)"
+  local hits=0
+  # Generic shapes of local truth. The patterns describe the *kind* of leak,
+  # never the specific machine — naming it here would be the leak.
+  local patterns=(
+    '/home/[A-Za-z0-9._-]+/'          # absolute home path of a real user
+    '/run/user/[0-9]+'                 # runtime dir carries a real uid
+    '0x[0-9a-f]{12,}'                  # Hyprland window addresses
+    '\bpid[=: ]+[0-9]{4,}'             # process ids from a real session
+    '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'  # e-mail addresses
+    'claude\.ai/code/session'          # session links
+    'HYPRLAND_INSTANCE_SIGNATURE=[0-9a-f_]+'
+  )
+  local f p
+  while IFS= read -r f; do
+    [[ -f $f ]] || continue
+    case "$f" in *.png|*.jpg|*.gif|*.woff*|*.ttf) continue ;; esac
+    for p in "${patterns[@]}"; do
+      if grep -nE -- "$p" "$f" | grep -vE 'users\.noreply\.github\.com|jd-notify|omarchy-jdownloader\.local' >/dev/null; then
+        bad "$f matches /$p/:"
+        grep -nE -- "$p" "$f" | grep -vE 'users\.noreply\.github\.com|jd-notify|omarchy-jdownloader\.local' | head -3 | sed 's/^/      /'
+        hits=1
+      fi
+    done
+    # Personal words, if the machine keeps a list. The list itself is
+    # ignored by git and never committed.
+    if [[ -f .privacy-words ]]; then
+      if grep -n -i -F -f .privacy-words -- "$f" >/dev/null 2>&1; then
+        bad "$f contains a word from .privacy-words:"
+        grep -n -i -F -f .privacy-words -- "$f" | head -3 | sed 's/^/      /'
+        hits=1
+      fi
+    fi
+  done < <(tracked_files)
+  # Commit authors and messages are public too.
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
+    if git log --format='%an <%ae>%n%cn <%ce>' | grep -vE 'users\.noreply\.github\.com|noreply@anthropic\.com' | grep -q .; then
+      bad "a commit carries an author or committer without a no-reply address:"
+      git log --format='%h %an <%ae> / %cn <%ce>' | grep -vE 'users\.noreply\.github\.com' | head -3 | sed 's/^/      /'
+      hits=1
+    fi
+    if git log --format='%B' | grep -qiE 'claude\.ai/code/session|/home/[A-Za-z0-9._-]+/'; then
+      bad "a commit message carries a session link or a home path"
+      hits=1
+    fi
+  fi
+  (( hits == 0 )) && ok "no local truth in tracked files or history"
+}
+
+pass_security() {
+  note "security (gitleaks)"
+  if ! command -v gitleaks >/dev/null 2>&1; then
+    bad "gitleaks is not installed (omarchy pkg add gitleaks) — mandatory"
+    return
+  fi
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
+    if gitleaks git --no-banner --redact --exit-code 1 . >/dev/null 2>&1; then ok "history is clean"; else bad "gitleaks found something in the history"; gitleaks git --no-banner --redact . 2>&1 | tail -15 | sed 's/^/      /'; fi
+  fi
+  if gitleaks dir --no-banner --redact --exit-code 1 . >/dev/null 2>&1; then ok "working tree is clean"; else bad "gitleaks found something in the working tree"; gitleaks dir --no-banner --redact . 2>&1 | tail -15 | sed 's/^/      /'; fi
+}
+
+pass_syntax() {
+  note "syntax"
+  local f
+  # shell
+  for f in bin/jd-cnl bin/jd-display bin/jd-notify bin/jd-watch bin/jd-window bin/check; do
+    bash -n "$f" && ok "$f (bash -n)" || bad "$f does not parse"
+  done
+  # python
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -m py_compile bin/jd-scan && ok "bin/jd-scan (py_compile)" || bad "bin/jd-scan does not compile"
+    rm -rf bin/__pycache__
+  fi
+  # javascript libraries (strip the QML pragma for node)
+  if command -v node >/dev/null 2>&1; then
+    for f in Model.js Lang.js; do
+      if sed '/^\.pragma/d' "$f" | node --check - 2>/dev/null; then ok "$f (node --check)"; else bad "$f does not parse"; fi
+    done
+    # Lang.js: every language carries every English key
+    if node -e '
+      const fs=require("fs"); const src=fs.readFileSync("Lang.js","utf8").replace(/^\.pragma.*$/m,"");
+      const m={}; new Function("module","exports",src+"\nmodule.exports={STRINGS,LANGUAGES};")(m,m.exports={});
+      const S=m.exports.STRINGS, en=Object.keys(S.en); let bad=0;
+      for (const l of m.exports.LANGUAGES) { if(!S[l]) {console.log("  missing table:",l); bad=1; continue;}
+        const miss=en.filter(k=>!(k in S[l])), extra=Object.keys(S[l]).filter(k=>!(k in S.en));
+        if(miss.length||extra.length){console.log("  "+l+": missing",miss,"extra",extra); bad=1;} }
+      process.exit(bad)'; then ok "Lang.js key parity"; else bad "Lang.js keys differ between languages"; fi
+  else
+    bad "node is not installed — JavaScript checks skipped"
+  fi
+  # QML
+  local qmllint=""
+  for f in /usr/lib/qt6/bin/qmllint "$(command -v qmllint || true)"; do [[ -n $f && -x $f ]] && { qmllint=$f; break; }; done
+  if [[ -n $qmllint ]]; then
+    local out
+    out="$("$qmllint" -I /usr/lib/qt6/qml --json - Panel.qml Service.qml 2>/dev/null | python3 -c '
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+bad=0
+for f in d.get("files",[]):
+    for w in f.get("warnings",[]):
+        if w.get("type")=="critical" or "Expected" in str(w.get("message","")):
+            print(f["filename"].split("/")[-1], w.get("line"), w.get("message")); bad=1
+sys.exit(bad)' 2>&1)" && ok "Panel.qml, Service.qml (qmllint)" || { bad "qmllint:"; printf '%s\n' "$out" | sed 's/^/      /'; }
+  else
+    bad "qmllint is not installed (qt6-declarative) — QML checks skipped"
+  fi
+  # manifest
+  if command -v jq >/dev/null 2>&1; then
+    jq -e '.schemaVersion == 1 and (.id | test("^io\\.github\\.")) and .entryPoints.barWidget' manifest.json >/dev/null && ok "manifest.json shape" || bad "manifest.json: schemaVersion, id or entry point"
+  fi
+  if command -v omarchy-plugin-validate >/dev/null 2>&1; then
+    omarchy-plugin-validate . >/dev/null 2>&1 && ok "omarchy plugin validate" || bad "omarchy plugin validate refused the folder"
+  fi
+}
+
+case "${1:-all}" in
+  privacy)  pass_privacy ;;
+  security) pass_security ;;
+  syntax)   pass_syntax ;;
+  all)      pass_privacy; pass_security; pass_syntax ;;
+  *) echo "usage: bin/check [privacy|security|syntax]" >&2; exit 2 ;;
+esac
+(( failed == 0 )) && { note "all passes green"; exit 0; } || { note "check failed"; exit 1; }

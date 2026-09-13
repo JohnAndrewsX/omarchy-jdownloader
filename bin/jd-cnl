@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# jd-cnl — hand links to the local JDownloader through Click'n'Load.
+#
+# Click'n'Load is always on in JDownloader, independent of any setting, at
+# 127.0.0.1:9666. It is the interface every browser uses to talk to
+# JDownloader — not the deprecated RemoteAPI. One-way: links in, yes; state
+# out, no (except the jdcheck.js liveness probe).
+#
+#   jd-cnl check              JSON: {alive, version}
+#   jd-cnl add URL [URL…]     hand URLs over (launches JD if needed and waits)
+#   jd-cnl clipboard          pull URLs from the Wayland clipboard and hand them over
+#
+# Output is always JSON: {ok, code, added, urls, message, args}. `code` is a
+# stable identifier the widget translates; `message` is English prose.
+set -euo pipefail
+
+BASE="http://127.0.0.1:9666"
+SOURCE="http://omarchy-jdownloader.local/"   # shown in JDownloader's Click'n'Load prompt
+WAIT_SECS="${JD_CNL_WAIT:-45}"
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+out() {
+  # out OK CODE ADDED URLS_JSON MESSAGE [ARGS_JSON]
+  jq -cn --argjson ok "$1" --arg code "$2" --argjson added "$3" --argjson urls "$4" \
+    --arg message "$5" --argjson args "${6:-{\}}" \
+    '{ok: $ok, code: $code, added: $added, urls: $urls, message: $message, args: $args}'
+}
+fail() { out false "$1" 0 '[]' "$2" "${3:-{\}}"; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || fail "cnl.missing_tool" "'$1' is not installed" "{\"tool\":\"$1\"}"; }
+need curl; need jq
+
+alive() {
+  local body
+  body="$(curl -s -m 1 "$BASE/jdcheck.js" 2>/dev/null || true)"
+  [[ $body == *"jdownloader=true"* ]]
+}
+
+cmd_check() {
+  local body v
+  body="$(curl -s -m 1 "$BASE/jdcheck.js" 2>/dev/null || true)"
+  v="$(sed -n "s/.*version='\([0-9]*\)'.*/\1/p" <<<"$body" | head -n1 || true)"
+  if [[ $body == *"jdownloader=true"* ]]; then jq -cn --arg v "$v" '{alive: true, version: $v}'
+  else jq -cn '{alive: false, version: ""}'; fi
+}
+
+extract_urls() {
+  # http(s), ftp(s), magnet — deduplicated, order preserved
+  grep -oE '(https?|ftps?)://[^[:space:]<>"'"'"'`]+|magnet:\?[^[:space:]<>"'"'"'`]+' \
+    | sed -E 's/[).,;:]+$//' | awk '!seen[$0]++'
+}
+
+ensure_running() {
+  alive && return 0
+  "$HERE/jd-window" launch >/dev/null 2>&1 || fail "cnl.launch_failed" "JDownloader could not be launched"
+  local i
+  for ((i = 0; i < WAIT_SECS * 2; i++)); do
+    alive && return 0
+    sleep 0.5
+  done
+  fail "cnl.timeout" "JDownloader did not answer Click'n'Load within ${WAIT_SECS}s" "{\"secs\":$WAIT_SECS}"
+}
+
+send_urls() {
+  local urls=("$@")
+  (( ${#urls[@]} > 0 )) || fail "cnl.no_url" "No URL found"
+  ensure_running
+  local body code tmp
+  body="$(printf '%s\n' "${urls[@]}")"
+  tmp="$(mktemp)"
+  # Parameters per JDownloader's ExternInterfaceImpl: urls, source, comment
+  # (also passwords, package, dir, autostart, referer — not needed here).
+  code="$(curl -s -m 8 -o "$tmp" -w '%{http_code}' \
+    --data-urlencode "urls=$body" \
+    --data-urlencode "source=$SOURCE" \
+    --data-urlencode "comment=via Omarchy" \
+    "$BASE/flash/add" 2>/dev/null || echo "000")"
+  local reply; reply="$(tr -d '\r' < "$tmp" 2>/dev/null | head -c 200 || true)"; rm -f "$tmp"
+  local json_urls; json_urls="$(printf '%s\n' "${urls[@]}" | jq -R . | jq -cs .)"
+  if [[ $code == "200" ]]; then
+    out true "cnl.added" "${#urls[@]}" "$json_urls" "${#urls[@]} link(s) handed to JDownloader${reply:+ — $reply}" "{\"n\":${#urls[@]}}"
+  else
+    out false "cnl.http" 0 "$json_urls" "Click'n'Load answered with HTTP $code${reply:+ — $reply}" "{\"code\":\"$code\"}"
+    exit 1
+  fi
+}
+
+cmd_add() {
+  local urls=() u
+  while IFS= read -r u; do [[ -n $u ]] && urls+=("$u"); done < <(printf '%s\n' "$@" | extract_urls)
+  send_urls "${urls[@]}"
+}
+
+cmd_clipboard() {
+  need wl-paste
+  local text; text="$(wl-paste --no-newline --type text 2>/dev/null || true)"
+  [[ -n $text ]] || fail "cnl.clipboard_empty" "Clipboard is empty or holds no text"
+  local urls=() u
+  while IFS= read -r u; do [[ -n $u ]] && urls+=("$u"); done < <(printf '%s' "$text" | extract_urls)
+  (( ${#urls[@]} > 0 )) || fail "cnl.clipboard_no_url" "No URL in the clipboard"
+  send_urls "${urls[@]}"
+}
+
+case "${1:-}" in
+  check)     cmd_check ;;
+  add)       shift; (( $# > 0 )) || fail "cnl.no_url" "add needs at least one URL"; cmd_add "$@" ;;
+  clipboard) cmd_clipboard ;;
+  -h|--help|"") sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; [[ -n ${1:-} ]] || exit 1 ;;
+  *) fail "cnl.usage" "unknown command: $1" ;;
+esac

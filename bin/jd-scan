@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""jd-scan — snapshot of the watched download folders as JSON.
+
+    jd-scan [--no-default] [--extra DIR]... [--recent N] [--max-files N]
+
+Reads the default download folder from JDownloader's GeneralSettings.json
+(not hard-coded: when the user changes it in JDownloader, the widget follows),
+adds the user's extra folders and reports:
+
+  defaultFolder   path from the configuration ("" if unknown)
+  cfgPath         which GeneralSettings.json was read
+  folders         per folder: exists, files, bytes, parts
+  active          *.part files = "something is happening" (a hint, not progress)
+  recent          the N newest finished files across all folders
+
+Folders outside this list are invisible — Packagizer rules and per-package
+destinations only exist in JDownloader's internal downloadList.zip, which we
+deliberately do not read.
+"""
+import argparse
+import json
+import os
+import sys
+
+HOME = os.path.expanduser("~")
+CFG_CANDIDATES = [
+    os.path.join(HOME, ".jd", "cfg", "org.jdownloader.settings.GeneralSettings.json"),
+    "/opt/JDownloader/cfg/org.jdownloader.settings.GeneralSettings.json",
+]
+PART_SUFFIX = ".part"
+MAX_DEPTH = 4
+
+
+def read_default_folder():
+    for path in CFG_CANDIDATES:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        folder = data.get("defaultdownloadfolder")
+        if isinstance(folder, str) and folder.strip():
+            return os.path.expanduser(folder.strip()), path
+        return "", path
+    return "", ""
+
+
+def normalize(path):
+    path = os.path.expanduser(str(path or "").strip())
+    if not path:
+        return ""
+    return os.path.normpath(path)
+
+
+def walk(folder, max_files):
+    """Files up to MAX_DEPTH deep, skipping hidden entries and symlinks."""
+    base_depth = folder.rstrip(os.sep).count(os.sep)
+    seen = 0
+    for root, dirs, files in os.walk(folder, followlinks=False):
+        depth = root.count(os.sep) - base_depth
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        if depth >= MAX_DEPTH:
+            dirs[:] = []
+        for name in files:
+            if name.startswith("."):
+                continue
+            full = os.path.join(root, name)
+            try:
+                st = os.lstat(full)
+            except OSError:
+                continue
+            if not os.path.isfile(full) or os.path.islink(full):
+                continue
+            seen += 1
+            if seen > max_files:
+                return
+            yield full, name, st
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--no-default", action="store_true")
+    ap.add_argument("--extra", action="append", default=[])
+    ap.add_argument("--recent", type=int, default=8)
+    ap.add_argument("--max-files", type=int, default=5000)
+    ap.add_argument("-h", "--help", action="store_true")
+    args = ap.parse_args()
+    if args.help:
+        print(__doc__.strip())
+        return 0
+
+    default_folder, cfg_path = read_default_folder()
+
+    folders = []
+    if not args.no_default and default_folder:
+        folders.append(default_folder)
+    for extra in args.extra:
+        p = normalize(extra)
+        if p and p not in folders:
+            folders.append(p)
+
+    folder_reports = []
+    active = []
+    finished = []
+    for folder in folders:
+        exists = os.path.isdir(folder)
+        report = {"path": folder, "exists": exists, "files": 0, "bytes": 0, "parts": 0,
+                  "isDefault": folder == default_folder}
+        if exists:
+            for full, name, st in walk(folder, args.max_files):
+                if name.endswith(PART_SUFFIX):
+                    report["parts"] += 1
+                    active.append({"name": name[: -len(PART_SUFFIX)], "path": full,
+                                   "dir": os.path.dirname(full), "size": st.st_size,
+                                   "mtime": int(st.st_mtime)})
+                    continue
+                report["files"] += 1
+                report["bytes"] += st.st_size
+                finished.append({"name": name, "path": full, "dir": os.path.dirname(full),
+                                 "size": st.st_size, "mtime": int(st.st_mtime)})
+        folder_reports.append(report)
+
+    active.sort(key=lambda f: f["mtime"], reverse=True)
+    finished.sort(key=lambda f: f["mtime"], reverse=True)
+
+    json.dump({
+        "defaultFolder": default_folder,
+        "cfgPath": cfg_path,
+        "folders": folder_reports,
+        "active": active[:50],
+        "recent": finished[: max(0, args.recent)],
+    }, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

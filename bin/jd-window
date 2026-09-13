@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# jd-window — JDownloader's window as seen by Hyprland.
+#
+# JDownloader is Java/Swing over XWayland. Its tray icon cannot work under
+# Wayland (XEmbed against an SNI host). This script does what a tray icon
+# would, through Hyprland's IPC: report whether JD runs, bring the window
+# back or tuck it away, launch, quit. It reads nothing from JDownloader
+# itself — only Hyprland and, as a liveness probe, Click'n'Load's jdcheck.js.
+#
+#   jd-window status          JSON: running/alive/hidden/focused/address/pid/…
+#   jd-window launch          launch (or bring back, if already running)
+#   jd-window show            move the window to the active workspace and focus it
+#   jd-window hide            move the window silently to the special workspace
+#   jd-window focus           focus only
+#   jd-window toggle [focus]  not running → launch · hidden → show ·
+#                             visible+focused → hide (or with "focus": focus only)
+#   jd-window quit [--force]  close the window (JD may ask) · --force: SIGTERM
+#
+# Exit 0 on success, 1 on error, 2 when no window exists where one is needed.
+set -euo pipefail
+
+SPECIAL_WS="special:jdownloader"
+CNL_URL="http://127.0.0.1:9666/jdcheck.js"
+
+die() { echo "jd-window: $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "'$1' is missing"; }
+need hyprctl; need jq
+
+# The main window: class contains "jdownloader" (JD's class is
+# org-jdownloader-update-launcher-JDLauncher; the AUR desktop file wrongly
+# claims jd-Main). Dialogs share the class, so prefer a title starting with
+# "JDownloader", then the most recently focused one.
+find_window() {
+  hyprctl -j clients | jq -c '
+    [ .[]
+      | select(.mapped == true)
+      | select(
+          ((.class // "") | test("jdownloader"; "i"))
+          or ((.initialClass // "") | test("jdownloader"; "i"))
+          or ((.title // "") | test("^JDownloader"))
+        )
+    ]
+    | sort_by(
+        (if ((.title // "") | test("^JDownloader")) then 0 else 1 end),
+        (.focusHistoryID // 999)
+      )
+    | .[0] // empty'
+}
+
+# Neither may ever abort the script: while JD is starting or just went away,
+# curl fails (exit 7) — under `set -e -o pipefail` that would end `status`,
+# and the widget would see an error instead of "not running".
+alive() {
+  command -v curl >/dev/null 2>&1 || return 1
+  local body
+  body="$(curl -s -m 1 "$CNL_URL" 2>/dev/null || true)"
+  [[ $body == *"jdownloader=true"* ]]
+}
+
+jd_version() {
+  command -v curl >/dev/null 2>&1 || { echo ""; return 0; }
+  local body
+  body="$(curl -s -m 1 "$CNL_URL" 2>/dev/null || true)"
+  sed -n "s/.*version='\([0-9]*\)'.*/\1/p" <<<"$body" | head -n1 || true
+  return 0
+}
+
+jd_pid() {
+  pgrep -u "$(id -u)" -f 'java .*JDownloader\.jar' 2>/dev/null | head -n1 || true
+}
+
+active_workspace_id() {
+  hyprctl -j activeworkspace | jq -r '.id'
+}
+
+# Hyprland 0.56 with Lua configuration: try the hl.dsp form first, then the
+# classic dispatcher — the same pattern as omarchy-launch-or-focus.
+dispatch_focus() {
+  local address="$1"
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 \
+    || hyprctl dispatch focuswindow "address:$address" >/dev/null 2>&1
+}
+
+desktop_file() {
+  local user="${XDG_DATA_HOME:-$HOME/.local/share}/applications/jdownloader.desktop"
+  if [[ -f $user ]]; then echo "$user"
+  elif [[ -f /usr/share/applications/jdownloader.desktop ]]; then echo /usr/share/applications/jdownloader.desktop
+  else echo ""
+  fi
+}
+
+cmd_status() {
+  local win; win="$(find_window)"
+  local is_alive=false; alive && is_alive=true
+  local version; version="$(jd_version)"
+  local pid; pid="$(jd_pid)"
+  local active_ws; active_ws="$(active_workspace_id)"
+  if [[ -z $win ]]; then
+    jq -cn \
+      --argjson alive "$is_alive" \
+      --arg version "$version" \
+      --arg pid "$pid" \
+      --arg activeWs "$active_ws" \
+      '{running: false, alive: $alive, starting: (($pid != "") and ($alive | not)),
+        pid: (if $pid == "" then null else ($pid | tonumber) end),
+        address: "", title: "", workspace: null, hidden: false, focused: false,
+        activeWorkspace: ($activeWs | tonumber? // null), version: $version}'
+    return 0
+  fi
+  local focused_addr; focused_addr="$(hyprctl -j activewindow 2>/dev/null | jq -r '.address // ""' 2>/dev/null || true)"
+  jq -cn \
+    --argjson win "$win" \
+    --argjson alive "$is_alive" \
+    --arg version "$version" \
+    --arg pid "$pid" \
+    --arg focused "$focused_addr" \
+    --arg activeWs "$active_ws" \
+    --arg special "$SPECIAL_WS" \
+    '{running: true, alive: $alive, starting: false,
+      pid: ($win.pid // (if $pid == "" then null else ($pid | tonumber) end)),
+      address: $win.address, title: ($win.title // ""),
+      workspace: {id: ($win.workspace.id // null), name: ($win.workspace.name // "")},
+      hidden: (($win.workspace.name // "") == $special),
+      focused: ($win.address == $focused),
+      activeWorkspace: ($activeWs | tonumber? // null),
+      version: $version}'
+}
+
+cmd_launch() {
+  local win; win="$(find_window)"
+  if [[ -n $win ]]; then cmd_show; return; fi
+  if [[ -n "$(jd_pid)" ]]; then
+    echo "jd-window: JDownloader is already starting" >&2
+    return 0
+  fi
+  local desktop; desktop="$(desktop_file)"
+  if [[ -n $desktop ]] && command -v uwsm-app >/dev/null 2>&1; then
+    # Through the desktop file, so a user override carrying the JVM switches
+    # (font smoothing, uiScale) applies. uwsm accepts a path to a desktop file.
+    setsid -f uwsm-app -- "$desktop" >/dev/null 2>&1 </dev/null
+  elif command -v jdownloader >/dev/null 2>&1; then
+    setsid -f jdownloader >/dev/null 2>&1 </dev/null
+  else
+    die "JDownloader is not installed (neither a desktop file nor 'jdownloader' on PATH)"
+  fi
+}
+
+cmd_show() {
+  local win; win="$(find_window)"
+  [[ -n $win ]] || { echo "jd-window: no JDownloader window" >&2; return 2; }
+  local address ws_name
+  address="$(jq -r '.address' <<<"$win")"
+  ws_name="$(jq -r '.workspace.name // ""' <<<"$win")"
+  if [[ $ws_name == "$SPECIAL_WS" ]]; then
+    hyprctl dispatch movetoworkspace "$(active_workspace_id),address:$address" >/dev/null 2>&1 || true
+  fi
+  dispatch_focus "$address"
+}
+
+cmd_hide() {
+  local win; win="$(find_window)"
+  [[ -n $win ]] || { echo "jd-window: no JDownloader window" >&2; return 2; }
+  local address; address="$(jq -r '.address' <<<"$win")"
+  hyprctl dispatch movetoworkspacesilent "$SPECIAL_WS,address:$address" >/dev/null 2>&1
+}
+
+cmd_focus() {
+  local win; win="$(find_window)"
+  [[ -n $win ]] || { echo "jd-window: no JDownloader window" >&2; return 2; }
+  dispatch_focus "$(jq -r '.address' <<<"$win")"
+}
+
+cmd_toggle() {
+  local mode="${1:-hide}"
+  local st; st="$(cmd_status)"
+  if [[ "$(jq -r '.running' <<<"$st")" != "true" ]]; then cmd_launch; return; fi
+  if [[ "$(jq -r '.hidden' <<<"$st")" == "true" ]]; then cmd_show; return; fi
+  if [[ "$(jq -r '.focused' <<<"$st")" == "true" && $mode == "hide" ]]; then cmd_hide; return; fi
+  cmd_focus
+}
+
+cmd_quit() {
+  local force=false
+  [[ ${1:-} == "--force" ]] && force=true
+  local win; win="$(find_window)"
+  local pid; pid="$(jd_pid)"
+  if [[ $force == true ]]; then
+    [[ -n $pid ]] || { echo "jd-window: JDownloader is not running" >&2; return 2; }
+    # SIGTERM: JDownloader hangs off AppWork's ShutdownController, which saves
+    # lists and configuration on the way down.
+    kill -TERM "$pid"
+    return 0
+  fi
+  [[ -n $win ]] || { echo "jd-window: no JDownloader window" >&2; return 2; }
+  # Polite: like clicking the X. JD asks if "on close" is set to ask — that is
+  # the user's setting, not ours.
+  hyprctl dispatch closewindow "address:$(jq -r '.address' <<<"$win")" >/dev/null 2>&1
+}
+
+case "${1:-}" in
+  status) cmd_status ;;
+  launch) cmd_launch ;;
+  show)   cmd_show ;;
+  hide)   cmd_hide ;;
+  focus)  cmd_focus ;;
+  toggle) cmd_toggle "${2:-hide}" ;;
+  quit)   cmd_quit "${2:-}" ;;
+  -h|--help|"") sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; [[ -n ${1:-} ]] || exit 1 ;;
+  *) die "unknown command: $1" ;;
+esac
