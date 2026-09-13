@@ -65,8 +65,8 @@ pass_privacy() {
   # Commit authors and messages are public too.
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
     # GitHub's own merge commits (pull request checkouts, squash merges) are
-    # signed <noreply@github.com>; those are fine. Everything else must be a
-    # per-user no-reply address.
+    # signed with GitHub's generic no-reply address; those are fine. Everything
+    # else must be a per-user no-reply address.
     local noreply='users\.noreply\.github\.com|<noreply@github\.com>'
     if git log --format='%an <%ae>%n%cn <%ce>' | grep -vE "$noreply" | grep -q .; then
       bad "a commit carries an author or committer without a no-reply address:"
