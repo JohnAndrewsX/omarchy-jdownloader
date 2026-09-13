@@ -64,9 +64,13 @@ pass_privacy() {
   done < <(tracked_files)
   # Commit authors and messages are public too.
   if git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git rev-parse HEAD >/dev/null 2>&1; then
-    if git log --format='%an <%ae>%n%cn <%ce>' | grep -vE 'users\.noreply\.github\.com|noreply@anthropic\.com' | grep -q .; then
+    # GitHub's own merge commits (pull request checkouts, squash merges) are
+    # signed with GitHub's generic no-reply address; those are fine. Everything
+    # else must be a per-user no-reply address.
+    local noreply='users\.noreply\.github\.com|<noreply@github\.com>'
+    if git log --format='%an <%ae>%n%cn <%ce>' | grep -vE "$noreply" | grep -q .; then
       bad "a commit carries an author or committer without a no-reply address:"
-      git log --format='%h %an <%ae> / %cn <%ce>' | grep -vE 'users\.noreply\.github\.com' | head -3 | sed 's/^/      /'
+      git log --format='%h %an <%ae> / %cn <%ce>' | grep -vE "$noreply" | head -3 | sed 's/^/      /'
       hits=1
     fi
     if git log --format='%B' | grep -qiE 'claude\.ai/code/session|/home/[A-Za-z0-9._-]+/'; then

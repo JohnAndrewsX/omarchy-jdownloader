@@ -1,0 +1,39 @@
+name: Feature request
+description: Something the widget should do
+title: "<verb> <object>"
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before writing: the widget reads nothing from JDownloader's internals — no deprecated API,
+        no cloud. Speed, progress and package lists are out of scope by design (DESIGN.md).
+        Everything the three channels can see (window state, Click'n'Load, watched folders) is fair game.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What should be possible
+      description: One or two sentences — what is true when this is done
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Which channel would it use
+      options:
+        - Hyprland / window state
+        - Click'n'Load (links in, liveness)
+        - Watched folders (inotify)
+        - Appearance (JVM switches in the desktop file)
+        - Translation / Lang.js
+        - Panel UI only
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why you want it, what you do today instead
+    validations:
+      required: false
